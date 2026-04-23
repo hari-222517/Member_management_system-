@@ -7,7 +7,7 @@ import reportWebVitals from './reportWebVitals';
 
 // Set axios base URL
 axios.defaults.baseURL = process.env.NODE_ENV === 'production' 
-  ? 'https://your-backend-url.onrender.com' // Replace with actual backend URL when deployed
+  ? 'https://member-management-system-5lbw.onrender.com' 
   : 'http://localhost:8001';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));

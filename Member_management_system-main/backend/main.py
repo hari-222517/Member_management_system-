@@ -13,15 +13,25 @@ import os
 
 # Configuration
 class Settings(BaseSettings):
-    mongodb_url: str = "mongodb://localhost:27017"
-    database_name: str = "member_management"
+    mongodb_url: str = Field(alias="MONGODB_URL")
+    database_name: str = Field(alias="DATABASE_NAME", default="member_management")
 
     class Config:
         env_file = ".env"
+        extra = "ignore"
 
 settings = Settings()
 
 app = FastAPI(title="Member Management API")
+
+# Health check route
+@app.get("/health")
+async def health_check():
+    try:
+        await client.admin.command('ping')
+        return {"status": "healthy", "database": "connected"}
+    except Exception as e:
+        return {"status": "unhealthy", "error": str(e)}
 
 # CORS middleware
 app.add_middleware(
