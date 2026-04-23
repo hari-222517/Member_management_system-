@@ -27,10 +27,17 @@ function Register() {
     setIsLoading(true);
     
     try {
-      await axios.post('/register', { email, password });
+      const response = await axios.post('/register', { email, password });
+      console.log('Registration success:', response.data);
       navigate('/login');
     } catch (err) {
-      setError('Failed to register. Email might already be in use.');
+      console.error('Registration error details:', err.response?.data || err.message);
+      const detail = err.response?.data?.detail;
+      if (detail) {
+        setError(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      } else {
+        setError('Failed to register. Server might be unreachable or email is in use.');
+      }
     } finally {
       setIsLoading(false);
     }

@@ -1,8 +1,14 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
+import axios from 'axios';
 import './index.css';
 import App from './App';
 import reportWebVitals from './reportWebVitals';
+
+// Set axios base URL
+axios.defaults.baseURL = process.env.NODE_ENV === 'production' 
+  ? 'https://your-backend-url.onrender.com' // Replace with actual backend URL when deployed
+  : 'http://localhost:8001';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(

@@ -19,7 +19,13 @@ function Login() {
       await login(email, password);
       navigate('/dashboard');
     } catch (err) {
-      setError('Failed to log in. Please check your credentials.');
+      console.error('Login error details:', err.response?.data || err.message);
+      const detail = err.response?.data?.detail;
+      if (detail) {
+        setError(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      } else {
+        setError('Failed to log in. Please check your credentials or server connection.');
+      }
     } finally {
       setIsLoading(false);
     }

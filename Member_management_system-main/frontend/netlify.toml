@@ -1,0 +1,23 @@
+[build]
+  command = "npm run build"
+  publish = "build"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[[redirects]]
+  from = "/register"
+  to = "/register"
+  status = 200
+
+[[redirects]]
+  from = "/login"
+  to = "/login"
+  status = 200
+
+[[redirects]]
+  from = "/dashboard"
+  to = "/dashboard"
+  status = 200
