@@ -5,16 +5,16 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 import jwt
 import bcrypt
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from pydantic_settings import BaseSettings
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session, relationship
+from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
 import os
 
 # Configuration
 class Settings(BaseSettings):
-    database_url: str
+    mongodb_url: str = "mongodb://localhost:27017"
+    database_name: str = "member_management"
 
     class Config:
         env_file = ".env"
@@ -39,29 +39,27 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-# Database setup
-engine = create_engine(settings.database_url)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+# MongoDB setup
+client = AsyncIOMotorClient(settings.mongodb_url)
+db = client[settings.database_name]
+users_collection = db["users"]
+members_collection = db["members"]
 
-# SQLAlchemy models
-class UserModel(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True, nullable=False)
-    password = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    members = relationship("MemberModel", back_populates="owner")
+# Helper for MongoDB ObjectId
+class PyObjectId(ObjectId):
+    @classmethod
+    def __get_validators__(cls):
+        yield cls.validate
 
-class MemberModel(Base):
-    __tablename__ = "members"
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)
-    email = Column(String, nullable=False)
-    role = Column(String, default="Member")
-    created_by = Column(Integer, ForeignKey("users.id"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    owner = relationship("UserModel", back_populates="members")
+    @classmethod
+    def validate(cls, v):
+        if not ObjectId.is_valid(v):
+            raise ValueError("Invalid objectid")
+        return ObjectId(v)
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, field_schema):
+        field_schema.update(type="string")
 
 # Pydantic models
 class UserCreate(BaseModel):
@@ -69,12 +67,13 @@ class UserCreate(BaseModel):
     password: str
 
 class User(BaseModel):
-    id: int
+    id: str = Field(alias="_id")
     email: str
     created_at: datetime
 
     class Config:
-        from_attributes = True
+        populate_by_name = True
+        json_encoders = {ObjectId: str}
 
 class Token(BaseModel):
     access_token: str
@@ -86,29 +85,21 @@ class MemberCreate(BaseModel):
     role: Optional[str] = "Member"
 
 class Member(BaseModel):
-    id: int
+    id: str = Field(alias="_id")
     name: str
     email: str
     role: str
     created_at: datetime
 
     class Config:
-        from_attributes = True
-
-# Dependency to get DB session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+        populate_by_name = True
+        json_encoders = {ObjectId: str}
 
 # Utility functions
 def verify_password(plain_password, hashed_password):
     return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
 
 def get_password_hash(password):
-    # Ensure password is bytes and truncate to 72 bytes for bcrypt
     if isinstance(password, str):
         password = password.encode('utf-8')
     if len(password) > 72:
@@ -121,7 +112,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+async def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -135,33 +126,33 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     except jwt.PyJWTError:
         raise credentials_exception
     
-    user = db.query(UserModel).filter(UserModel.email == email).first()
+    user = await users_collection.find_one({"email": email})
     if user is None:
         raise credentials_exception
+    user["_id"] = str(user["_id"])
     return user
 
 # Routes
-@app.on_event("startup")
-async def startup_event():
-    Base.metadata.create_all(bind=engine)
-
 @app.post("/register", response_model=User)
-async def register(user: UserCreate, db: Session = Depends(get_db)):
-    db_user = db.query(UserModel).filter(UserModel.email == user.email).first()
+async def register(user: UserCreate):
+    db_user = await users_collection.find_one({"email": user.email})
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
     
     hashed_password = get_password_hash(user.password)
-    new_user = UserModel(email=user.email, password=hashed_password)
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    return new_user
+    new_user_data = {
+        "email": user.email,
+        "password": hashed_password,
+        "created_at": datetime.utcnow()
+    }
+    result = await users_collection.insert_one(new_user_data)
+    new_user_data["_id"] = str(result.inserted_id)
+    return new_user_data
 
 @app.post("/token", response_model=Token)
-async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(UserModel).filter(UserModel.email == form_data.username).first()
-    if not user or not verify_password(form_data.password, user.password):
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = await users_collection.find_one({"email": form_data.username})
+    if not user or not verify_password(form_data.password, user["password"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -170,38 +161,48 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
     
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user.email}, expires_delta=access_token_expires
+        data={"sub": user["email"]}, expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
 @app.get("/users/me", response_model=User)
-async def read_users_me(current_user: UserModel = Depends(get_current_user)):
+async def read_users_me(current_user: dict = Depends(get_current_user)):
     return current_user
 
 @app.post("/members", response_model=Member)
-async def create_member(member: MemberCreate, db: Session = Depends(get_db), current_user: UserModel = Depends(get_current_user)):
-    db_member = db.query(MemberModel).filter(MemberModel.email == member.email).first()
+async def create_member(member: MemberCreate, current_user: dict = Depends(get_current_user)):
+    db_member = await members_collection.find_one({"email": member.email})
     if db_member:
         raise HTTPException(status_code=400, detail="Member with this email already exists")
 
-    new_member = MemberModel(**member.model_dump(), created_by=current_user.id)
-    db.add(new_member)
-    db.commit()
-    db.refresh(new_member)
-    return new_member
+    new_member_data = {
+        **member.model_dump(),
+        "created_by": current_user["_id"],
+        "created_at": datetime.utcnow()
+    }
+    result = await members_collection.insert_one(new_member_data)
+    new_member_data["_id"] = str(result.inserted_id)
+    return new_member_data
 
 @app.get("/members", response_model=List[Member])
-async def get_members(db: Session = Depends(get_db), current_user: UserModel = Depends(get_current_user)):
-    return db.query(MemberModel).filter(MemberModel.created_by == current_user.id).order_by(MemberModel.created_at.desc()).all()
+async def get_members(current_user: dict = Depends(get_current_user)):
+    cursor = members_collection.find({"created_by": current_user["_id"]}).sort("created_at", -1)
+    members = []
+    async for doc in cursor:
+        doc["_id"] = str(doc["_id"])
+        members.append(doc)
+    return members
 
 @app.delete("/members/{member_id}")
-async def delete_member(member_id: int, db: Session = Depends(get_db), current_user: UserModel = Depends(get_current_user)):
-    member_to_delete = db.query(MemberModel).filter(MemberModel.id == member_id, MemberModel.created_by == current_user.id).first()
-    if not member_to_delete:
+async def delete_member(member_id: str, current_user: dict = Depends(get_current_user)):
+    result = await members_collection.delete_one({
+        "_id": ObjectId(member_id),
+        "created_by": current_user["_id"]
+    })
+    
+    if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Member not found")
     
-    db.delete(member_to_delete)
-    db.commit()
     return {"message": "Member deleted successfully"}
 
 if __name__ == "__main__":
